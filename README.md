@@ -1,3 +1,8 @@
 For running:
-> npm install
-> npm start
+```
+# install dependencies
+npm install
+
+# Running
+npm start
+```
