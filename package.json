@@ -5,6 +5,7 @@
   "main": "dist/app.js",
   "scripts": {
     "start": "tsc && node dist/app.js",
+    "clean": "rm data/mapper-end/*.txt data/mapper-end/combinator-end/*.txt data/shuffle/*.txt data/split/*.txt data/reducer-end/*.txt",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "author": "Erick Naunay",
