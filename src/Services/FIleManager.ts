@@ -13,11 +13,14 @@ type SplitReturn = {
 export interface IFileManager {
   splitFiles(filePath: string): Promise<SplitReturn>;
   storeDataService(input: OutputMapperType, index: number): void;
-  storeDataExecutor(input: StreamServiceType, index: number): void;
-  storeDataShufflerExecutor(
-    input: OutputShufflerType,
-    index: number
+  storeReduceAllData(input: OutputMapperType): void;
+  storeDataExecutor(
+    input: StreamServiceType,
+    index: number,
+    type: string
   ): void;
+  storeDataShufflerExecutor(input: OutputShufflerType, index: number): string;
+  retrieveDataShufflerExecutor(filePath: string): Promise<OutputShufflerType>;
   retrieveDataExecutors(): Promise<OutputMapperType>;
 }
 
@@ -65,10 +68,7 @@ export class FileManager implements IFileManager {
     });
   }
 
-  storeDataService(
-    input: OutputMapperType,
-    index: number
-  ): void {
+  storeDataService(input: OutputMapperType, index: number): void {
     let file: string = "";
     input.forEach((tuple, index) => {
       file += `${tuple[0]},${tuple[1]}\n`;
@@ -76,24 +76,33 @@ export class FileManager implements IFileManager {
     fs.writeFileSync(`./data/mapper-end/mapper-${index}.txt`, file);
   }
 
+  storeReduceAllData(input: OutputMapperType): void {
+    let file: string = "";
+    input.forEach((tuple, index) => {
+      file += `${tuple[0]},${tuple[1]}\n`;
+    });
+    fs.writeFileSync(`./data/wordCount.txt`, file);
+  }
+
   storeDataExecutor(
     input: StreamServiceType,
-    index: number
+    index: number,
+    type: string
   ): void {
     let file: string = "";
+    let URL = "";
+
+    if (type === "mapper")
+      URL = `./data/mapper-end/combinator-end/mapper-${index}.txt`;
+    else URL = `./data/reducer-end/reducer-${index}.txt`;
+
     for (const key in input) {
       file += `${key},${input[key]}\n`;
     }
-    fs.writeFileSync(
-      `./data/mapper-end/combinator-end/mapper-${index}.txt`,
-      file
-    );
+    fs.writeFileSync(URL, file);
   }
 
-  storeDataShufflerExecutor(
-    input: OutputShufflerType,
-    index: number
-  ): void {
+  storeDataShufflerExecutor(input: OutputShufflerType, index: number): string {
     const filePath = `./data/shuffle/shuffle-partition-${index}.txt`;
     let file: string = "";
     for (const key in input) {
@@ -104,6 +113,7 @@ export class FileManager implements IFileManager {
       file += "\n";
     }
     fs.writeFileSync(filePath, file);
+    return filePath;
   }
 
   async retrieveDataExecutors(): Promise<OutputMapperType> {
@@ -118,6 +128,21 @@ export class FileManager implements IFileManager {
           if (last) resolve(result);
         });
       }
+    });
+  }
+  async retrieveDataShufflerExecutor(
+    filePath: string
+  ): Promise<OutputShufflerType> {
+    const result: OutputShufflerType = {};
+    return new Promise((resolve, reject) => {
+      lineReader.eachLine(filePath, (line, last) => {
+        const data = line.split(",");
+        result[data[0]] = [];
+        data.forEach((val, index) => {
+          if (index !== 0) result[data[0]].push(+val);
+        });
+        if (last) resolve(result);
+      });
     });
   }
 }

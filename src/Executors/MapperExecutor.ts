@@ -33,9 +33,11 @@ export class MapperExecutor implements IMapperExecutor {
     this.combinator = new Combinator();
     this.index = index;
     this.fileManager = fileManager;
+    console.log(`Mapper Executor job with id = '${this.index}' CREATED`)
   }
 
   async execute(input: StreamServiceType): Promise<StreamServiceType> {
+    console.log(`Mapper Executor job with id = '${this.index}' START WORKING`)
     const outputMapper = await this.executeMapper(input);
     this.fileManager.storeDataService(outputMapper, this.index);
     const result = await this.executeCombinator(outputMapper);

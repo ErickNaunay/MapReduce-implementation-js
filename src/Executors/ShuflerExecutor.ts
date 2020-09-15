@@ -13,17 +13,18 @@ export class ShufflerExecutor {
   private readonly shuffler: IShuffler;
   private readonly fileManager: IFileManager;
 
-  constructor(
-    shuffler: IShuffler,
-    fileManager: IFileManager
-  ) {
+  constructor(shuffler: IShuffler, fileManager: IFileManager) {
     this.shuffler = shuffler;
     this.fileManager = fileManager;
+    console.log("Shuffler job created.");
   }
 
   async execute(): Promise<OutputShufflerType> {
+    console.log("Shuffler job starting...");
     const data = await this.fileManager.retrieveDataExecutors();
-    return await this.shuffler.execute(data)
+    const result = await this.shuffler.execute(data);
+    console.log("Shuffler job COMPLETE");
+    return result;
   }
 }
 

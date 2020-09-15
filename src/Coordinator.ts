@@ -1,7 +1,7 @@
 import fs from "fs";
 import MapperExecutor, {
   IMapperExecutor,
-  OutputMapperType,
+  StreamServiceType,
 } from "./Executors/MapperExecutor";
 import WordCountMapper from "./Services/Mapper";
 import FileManager, { IFileManager } from "./Services/FIleManager";
@@ -9,6 +9,11 @@ import ShufflerExecutor, {
   IShufflerExecutor,
   OutputShufflerType,
 } from "./Executors/ShuflerExecutor";
+import {
+  IReduccerExecutor,
+  ReducerExecutor,
+} from "./Executors/ReducerExecutor";
+import { WordCountReducer } from "./Services/Reducer";
 import { Shuffler } from "./Services/Shuffler";
 
 export interface ICoordinator {
@@ -20,9 +25,10 @@ export default class Coordinator implements ICoordinator {
   private readonly maxNumReducers: number;
   private readonly fileManager: IFileManager;
   private mappers: IMapperExecutor[];
+  private reducers: IReduccerExecutor[];
   private shuffler: IShufflerExecutor;
   private mapperDist: string[][];
-  private reducerDist: string[][];
+  private reducerDist: string[];
 
   constructor(
     maxMappers: number = +process.env.DEFAULT_MAPPERS!,
@@ -41,14 +47,20 @@ export default class Coordinator implements ICoordinator {
       return mappers;
     })();
     console.log("Coordinator setup mapper jobs");
+    this.reducers = (() => {
+      const reducers: IReduccerExecutor[] = [];
+      for (let i = 0; i < maxReducers; i++)
+        reducers.push(new ReducerExecutor(new WordCountReducer(), i));
+      return reducers;
+    })();
+    console.log("Coordinator setup reducer jobs");
     this.mapperDist = (() => {
       const dist: string[][] = [];
       for (let i = 0; i < this.maxNumMappers; i++) dist.push([]);
       return dist;
     })();
     this.reducerDist = (() => {
-      const dist: string[][] = [];
-      for (let i = 0; i < this.maxNumReducers; i++) dist.push([]);
+      const dist: string[] = [];
       return dist;
     })();
     this.shuffler = new ShufflerExecutor(new Shuffler(), this.fileManager);
@@ -58,6 +70,7 @@ export default class Coordinator implements ICoordinator {
     const splitFiles = await this.fileManager.splitFiles(filePath);
     await this.map(splitFiles.files);
     await this.shuffle();
+    await this.reduce();
   }
 
   async map(files: string[]): Promise<void> {
@@ -66,6 +79,8 @@ export default class Coordinator implements ICoordinator {
       const index = i % this.maxNumMappers;
       this.mapperDist[index].push(files[i]);
     }
+    console.log(`MAPPERS partition: `);
+    console.log(this.mapperDist);
 
     console.log("Coordinator loading files in memory for mappers");
     const inputSets = this.mapperDist.map((val) => {
@@ -83,13 +98,14 @@ export default class Coordinator implements ICoordinator {
       "All mappers jobs finished. Storaging intermidiate files in disk."
     );
     midData.forEach((outputMapper, index) => {
-      this.fileManager.storeDataExecutor(outputMapper, index);
+      this.fileManager.storeDataExecutor(outputMapper, index, "mapper");
     });
   }
 
   async shuffle(): Promise<void> {
+    console.log("Coordinator ready to start shuffler job");
     const data = await this.shuffler.execute();
-    
+
     const saveData: OutputShufflerType[] = (() => {
       const array: OutputShufflerType[] = [];
       for (let i = 0; i < this.maxNumReducers; i++) array.push({});
@@ -105,8 +121,51 @@ export default class Coordinator implements ICoordinator {
       count++;
     }
 
-    saveData.map((partition, index) => {
-      this.fileManager.storeDataShufflerExecutor(partition, index);
+    const filesSaved = saveData.map((partition, index) => {
+      return this.fileManager.storeDataShufflerExecutor(partition, index);
     });
+
+    filesSaved.forEach((val, index) => {
+      this.reducerDist[index] = val;
+    });
+    console.log(`REDUCERS partition:`);
+    console.log(this.reducerDist);
+  }
+
+  async reduce(): Promise<void> {
+    const result = await Promise.all(
+      this.reducerDist.map(async (val, index) => {
+        const data = await this.fileManager.retrieveDataShufflerExecutor(val);
+        return this.reducers[index].execute(data);
+      })
+    );
+
+    console.log(
+      "All reducers jobs finished. Storaging intermidiate files in disk."
+    );
+
+    result.forEach((val, index) => {
+      this.fileManager.storeDataExecutor(val, index, "reducer");
+    });
+
+    await this.reduceAll(result);
+  }
+
+  private async reduceAll(stream: StreamServiceType[]): Promise<void> {
+    console.log("ReduceAll task started...");
+    const data: [string, number][] = [];
+    stream.map((val) => {
+      for (const key in val) {
+        data.push([key, +val[key]]);
+      }
+    });
+    data.sort(this.comparatorReduceAll);
+    console.log("ReduceAll storaging final ouput on disk...");
+    this.fileManager.storeReduceAllData(data);
+  }
+  private comparatorReduceAll(a: [string, number], b: [string, number]) {
+    if (a[1] < b[1]) return 1;
+    if (a[1] > b[1]) return -1;
+    return 0;
   }
 }
