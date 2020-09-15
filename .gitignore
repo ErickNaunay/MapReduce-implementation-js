@@ -4,5 +4,6 @@
 /data/mapper-end/combinator-end/*.txt
 /data/shuffle/*.txt
 /data/split/*txt
+/data/reducer-end/*.txt
 
 /dist/
