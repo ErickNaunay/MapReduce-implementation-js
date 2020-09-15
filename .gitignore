@@ -1,0 +1,8 @@
+/node_modules
+
+/data/mapper-end/*.txt
+/data/mapper-end/combinator-end/*.txt
+/data/shuffle/*.txt
+/data/split/*txt
+
+/dist/
