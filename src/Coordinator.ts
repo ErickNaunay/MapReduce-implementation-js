@@ -2,6 +2,7 @@ import fs from "fs";
 import MapperExecutor, {
   IMapperExecutor,
   StreamServiceType,
+  ExecutorStatusEnum,
 } from "./Executors/MapperExecutor";
 import WordCountMapper from "./Services/Mapper";
 import FileManager, { IFileManager } from "./Services/FIleManager";
@@ -15,6 +16,13 @@ import {
 } from "./Executors/ReducerExecutor";
 import { WordCountReducer } from "./Services/Reducer";
 import { Shuffler } from "./Services/Shuffler";
+import ExecutorError, { NodesEnum } from "./Executors/ExecutorError";
+
+export interface optionsFailure {
+  mapper: boolean;
+  reducer: boolean;
+  coordinator: boolean;
+}
 
 export interface ICoordinator {
   map(files: string[]): Promise<void>;
@@ -29,31 +37,51 @@ export default class Coordinator implements ICoordinator {
   private shuffler: IShufflerExecutor;
   private mapperDist: string[][];
   private reducerDist: string[];
+  private options: optionsFailure;
 
-  constructor(
-    maxMappers: number = +process.env.DEFAULT_MAPPERS!,
-    maxReducers: number = +process.env.DEFAULT_REDUCERS!
-  ) {
+  constructor(options: optionsFailure) {
     console.log("Coordinator job created");
-    this.maxNumMappers = maxMappers;
-    this.maxNumReducers = maxReducers;
+    this.maxNumMappers = +process.env.DEFAULT_MAPPERS!;
+    this.maxNumReducers = +process.env.DEFAULT_REDUCERS!;
     this.fileManager = new FileManager(this.maxNumMappers, this.maxNumReducers);
+    this.options = options;
+    console.log("Failure options: ", options);
+
     this.mappers = (() => {
       const mappers: IMapperExecutor[] = [];
-      for (let i = 0; i < maxMappers; i++)
-        mappers.push(
-          new MapperExecutor(new WordCountMapper(), i, this.fileManager)
+      let mapperFailIndex = this.maxNumMappers;
+      if (this.options.mapper)
+        mapperFailIndex = Math.floor(
+          Math.random() * Math.floor(this.maxNumMappers)
         );
+      for (let i = 0; i < this.maxNumMappers; i++) {
+        let fail = false;
+        if (i === mapperFailIndex) fail = true;
+        mappers.push(
+          new MapperExecutor(new WordCountMapper(), i, this.fileManager, fail)
+        );
+      }
       return mappers;
     })();
+
     console.log("Coordinator setup mapper jobs");
     this.reducers = (() => {
+      let reducerFailIndex = this.maxNumReducers;
+      if (this.options.reducer)
+        reducerFailIndex = Math.floor(
+          Math.random() * Math.floor(this.maxNumReducers)
+        );
       const reducers: IReduccerExecutor[] = [];
-      for (let i = 0; i < maxReducers; i++)
-        reducers.push(new ReducerExecutor(new WordCountReducer(), i));
+      for (let i = 0; i < this.maxNumReducers; i++) {
+        let fail = false;
+        if (i === reducerFailIndex) fail = true;
+        reducers.push(new ReducerExecutor(new WordCountReducer(), i, fail));
+      }
       return reducers;
     })();
+
     console.log("Coordinator setup reducer jobs");
+
     this.mapperDist = (() => {
       const dist: string[][] = [];
       for (let i = 0; i < this.maxNumMappers; i++) dist.push([]);
@@ -63,14 +91,28 @@ export default class Coordinator implements ICoordinator {
       const dist: string[] = [];
       return dist;
     })();
+
     this.shuffler = new ShufflerExecutor(new Shuffler(), this.fileManager);
   }
 
   async start(filePath: string): Promise<void> {
-    const splitFiles = await this.fileManager.splitFiles(filePath);
-    await this.map(splitFiles.files);
-    await this.shuffle();
-    await this.reduce();
+    try {
+      if (this.options.coordinator)
+        throw new ExecutorError(
+          "Coordinator node failure!",
+          0,
+          NodesEnum.coordinator
+        );
+      const splitFiles = await this.fileManager.splitFiles(filePath);
+      await this.map(splitFiles.files);
+      await this.shuffle();
+      await this.reduce();
+    } catch (err) {
+      console.log(
+        "Fatal failure on coordinator. Can't recover nor continue. Master STOP"
+      );
+      throw err;
+    }
   }
 
   async map(files: string[]): Promise<void> {
@@ -89,11 +131,43 @@ export default class Coordinator implements ICoordinator {
       return data;
     });
 
-    console.log("Coordinator executing mappers jobs");
-    const midData = await Promise.all(
-      inputSets.map((input, index) => this.mappers[index].execute(input))
-    );
+    console.log("Coordinator ready for executing mappers jobs");
+    let midData: StreamServiceType[] = [];
+    while (true) {
+      console.log("MapperExecutors ready to execute...");
+      console.log("MapperExecutors set status to inprogress...executing");
+      const mapperResult = await Promise.all(
+        inputSets.map((input, index) => {
+          this.mappers[index].setStatus(ExecutorStatusEnum.inProgress);
+          return this.mappers[index].execute(input);
+        })
+      ).catch((err: ExecutorError) => {
+        console.log(err);
 
+        console.log("MapperExecutors set to state inactive...");
+        console.log("ReducerExecutors notified...");
+        this.mappers.forEach((mapper) =>
+          mapper.setStatus(ExecutorStatusEnum.inactive)
+        );
+
+        console.log("Creating new mapper and reassamble executor");
+        this.mappers[err.id] = new MapperExecutor(
+          new WordCountMapper(),
+          err.id,
+          this.fileManager,
+          false
+        );
+      });
+
+      if (mapperResult) {
+        midData = mapperResult;
+        break;
+      }
+    }
+
+    this.mappers.forEach((mapper) =>
+      mapper.setStatus(ExecutorStatusEnum.complete)
+    );
     console.log(
       "All mappers jobs finished. Storaging intermidiate files in disk."
     );
@@ -133,11 +207,40 @@ export default class Coordinator implements ICoordinator {
   }
 
   async reduce(): Promise<void> {
-    const result = await Promise.all(
-      this.reducerDist.map(async (val, index) => {
-        const data = await this.fileManager.retrieveDataShufflerExecutor(val);
-        return this.reducers[index].execute(data);
-      })
+    let result: StreamServiceType[] = [];
+    while (true) {
+      console.log("ReducerExecutors ready to execute...");
+      console.log("ReducerExecutors set status to inprogress...executing");
+      const reducersData = await Promise.all(
+        this.reducerDist.map(async (val, index) => {
+          const data = await this.fileManager.retrieveDataShufflerExecutor(val);
+          this.reducers[index].setStatus(ExecutorStatusEnum.inProgress);
+          return this.reducers[index].execute(data);
+        })
+      ).catch((err) => {
+        console.log(err);
+
+        console.log("ReducerExecutors set to state inactive...");
+        this.reducers.forEach((reducer) =>
+          reducer.setStatus(ExecutorStatusEnum.inactive)
+        );
+
+        console.log("Creating new reducer and reassamble executor");
+        this.reducers[err.id] = new ReducerExecutor(
+          new WordCountReducer(),
+          err.id,
+          false
+        );
+      });
+
+      if (reducersData) {
+        result = reducersData;
+        break;
+      }
+    }
+
+    this.reducers.forEach((reducer) =>
+      reducer.setStatus(ExecutorStatusEnum.complete)
     );
 
     console.log(
